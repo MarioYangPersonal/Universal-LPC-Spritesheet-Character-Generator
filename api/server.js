@@ -5,6 +5,8 @@ const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const NodeCache = require('node-cache');
 const { generateSpritesheet, generateSpritesheets } = require('./src/renderer');
+const { getCachedSpritesheet, saveCachedSpritesheet, getCacheStats } = require('./src/cache');
+const adminRouter = require('./src/admin');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -25,6 +27,9 @@ const limiter = rateLimit({
   message: { error: 'Too many requests, please try again later.' }
 });
 app.use('/api/', limiter);
+
+// Mount admin router
+app.use('/api/admin', adminRouter);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -94,26 +99,44 @@ app.post('/api/generate', async (req, res) => {
       }
     }
 
-    // Generate cache key
-    const cacheKey = JSON.stringify({ bodyTypeName, layers });
-    const cached = cache.get(cacheKey);
+    // Check disk cache first (persistent, pre-generated)
+    const diskCached = await getCachedSpritesheet(bodyTypeName, layers);
 
-    if (cached) {
-      console.log(`[Cache Hit] ${bodyTypeName} - ${layers.length} layers`);
+    if (diskCached.hit) {
+      console.log(`[Disk Cache Hit] ${bodyTypeName} - ${layers.length} layers - ${diskCached.hash}`);
       res.set({
         'Content-Type': 'image/png',
-        'X-Cache': 'HIT',
+        'X-Cache': 'DISK-HIT',
+        'X-Cache-Key': diskCached.hash,
         'X-Render-Time': '0ms'
       });
-      return res.send(cached);
+      return res.send(diskCached.buffer);
     }
 
-    // Generate spritesheet
+    // Check memory cache (recent generations)
+    const cacheKey = JSON.stringify({ bodyTypeName, layers });
+    const memoryCached = cache.get(cacheKey);
+
+    if (memoryCached) {
+      console.log(`[Memory Cache Hit] ${bodyTypeName} - ${layers.length} layers`);
+      res.set({
+        'Content-Type': 'image/png',
+        'X-Cache': 'MEMORY-HIT',
+        'X-Render-Time': '0ms'
+      });
+      return res.send(memoryCached);
+    }
+
+    // Generate spritesheet (not in any cache)
     const canvas = await generateSpritesheet({ bodyTypeName, layers });
     const buffer = canvas.toBuffer('image/png');
 
-    // Cache the result
+    // Cache in memory for 1 hour
     cache.set(cacheKey, buffer);
+
+    // Optionally save to disk cache for persistence
+    // Uncomment if you want all generated sprites cached to disk:
+    // await saveCachedSpritesheet(bodyTypeName, layers, buffer);
 
     const renderTime = Date.now() - startTime;
 

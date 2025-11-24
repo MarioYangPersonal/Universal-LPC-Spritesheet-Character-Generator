@@ -14,7 +14,7 @@ WORKDIR /app
 
 # Copy package files from api directory and install dependencies
 COPY api/package*.json ./
-RUN npm ci --production
+RUN npm install --production
 
 # Copy application code from api directory
 COPY api/src ./src

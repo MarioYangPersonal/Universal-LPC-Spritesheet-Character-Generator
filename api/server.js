@@ -172,7 +172,7 @@ app.post('/api/generate', async (req, res) => {
  * Returns: JSON with base64-encoded PNGs
  */
 app.post('/api/generate-batch', async (req, res) => {
-  const startTime = Date.now();
+  const batchStartTime = Date.now();
 
   try {
     const definitions = req.body;
@@ -184,42 +184,114 @@ app.post('/api/generate-batch', async (req, res) => {
       });
     }
 
-    if (definitions.length > 10) {
+    const maxBatchSize = parseInt(process.env.MAX_BATCH_SIZE || '200', 10);
+    if (definitions.length > maxBatchSize) {
       return res.status(400).json({
         error: 'Too many requests',
-        message: 'Maximum 10 spritesheets per batch request'
+        message: `Maximum ${maxBatchSize} spritesheets per batch request`
       });
     }
 
-    // Generate all spritesheets
-    const results = await generateSpritesheets(definitions);
+    // Process each definition and check cache
+    const results = [];
+    let diskHits = 0;
+    let memoryHits = 0;
+    let generated = 0;
 
-    // Convert to base64 for JSON response
-    const response = results.map(result => {
-      if (result.success) {
-        const buffer = result.canvas.toBuffer('image/png');
-        return {
-          bodyTypeName: result.bodyTypeName,
+    for (const def of definitions) {
+      const { bodyTypeName, layers } = def;
+      const itemStartTime = Date.now();
+
+      try {
+        // Check disk cache first
+        const diskCached = await getCachedSpritesheet(bodyTypeName, layers);
+
+        if (diskCached.hit) {
+          // Disk cache hit!
+          diskHits++;
+          const renderTime = Date.now() - itemStartTime;
+
+          results.push({
+            bodyTypeName,
+            success: true,
+            cacheStatus: 'DISK-HIT',
+            cacheKey: diskCached.hash,
+            renderTime: `${renderTime}ms`,
+            data: diskCached.buffer.toString('base64'),
+            size: diskCached.buffer.length
+          });
+
+          console.log(`[Batch DISK-HIT] ${bodyTypeName} - ${diskCached.hash} - ${renderTime}ms`);
+          continue;
+        }
+
+        // Check memory cache
+        const cacheKey = JSON.stringify({ bodyTypeName, layers });
+        const memoryCached = cache.get(cacheKey);
+
+        if (memoryCached) {
+          // Memory cache hit!
+          memoryHits++;
+          const renderTime = Date.now() - itemStartTime;
+
+          results.push({
+            bodyTypeName,
+            success: true,
+            cacheStatus: 'MEMORY-HIT',
+            renderTime: `${renderTime}ms`,
+            data: memoryCached.toString('base64'),
+            size: memoryCached.length
+          });
+
+          console.log(`[Batch MEMORY-HIT] ${bodyTypeName} - ${renderTime}ms`);
+          continue;
+        }
+
+        // Not in cache - generate
+        const canvas = await generateSpritesheet({ bodyTypeName, layers });
+        const buffer = canvas.toBuffer('image/png');
+
+        // Cache in memory for future requests
+        cache.set(cacheKey, buffer);
+
+        generated++;
+        const renderTime = Date.now() - itemStartTime;
+
+        results.push({
+          bodyTypeName,
           success: true,
+          cacheStatus: 'GENERATED',
+          renderTime: `${renderTime}ms`,
           data: buffer.toString('base64'),
           size: buffer.length
-        };
-      } else {
-        return {
-          bodyTypeName: result.bodyTypeName,
+        });
+
+        console.log(`[Batch GENERATED] ${bodyTypeName} - ${renderTime}ms - ${buffer.length} bytes`);
+
+      } catch (error) {
+        results.push({
+          bodyTypeName,
           success: false,
-          error: result.error
-        };
+          cacheStatus: 'ERROR',
+          error: error.message
+        });
+        console.error(`[Batch ERROR] ${bodyTypeName} - ${error.message}`);
       }
-    });
+    }
 
-    const renderTime = Date.now() - startTime;
+    const totalTime = Date.now() - batchStartTime;
 
-    console.log(`[Batch Generated] ${results.length} spritesheets - ${renderTime}ms`);
+    console.log(`[Batch Complete] Total: ${results.length}, Disk: ${diskHits}, Memory: ${memoryHits}, Generated: ${generated} - ${totalTime}ms`);
 
     res.json({
-      results: response,
-      totalTime: `${renderTime}ms`
+      results,
+      summary: {
+        total: results.length,
+        diskHits,
+        memoryHits,
+        generated,
+        totalTime: `${totalTime}ms`
+      }
     });
 
   } catch (error) {

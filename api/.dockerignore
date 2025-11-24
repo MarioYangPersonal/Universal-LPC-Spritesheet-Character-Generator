@@ -6,4 +6,4 @@ README.md
 .env
 *.md
 cache/
-*.png
+# Don't exclude *.png - we need the sprite assets!

@@ -1,0 +1,45 @@
+{
+  "bodyTypeName": "male",
+  "layers": [
+    {
+      "fileName": "body/bodies/male/fur_grey.png",
+      "zPos": 10,
+      "variant": "fur_grey"
+    },
+    {
+      "fileName": "head/heads/troll/adult/light.png",
+      "zPos": 100,
+      "variant": "light"
+    },
+    {
+      "fileName": "hair/relm_xlong/adult/fg/chestnut.png",
+      "zPos": 120,
+      "variant": "chestnut"
+    },
+    {
+      "fileName": "hair/relm_xlong/adult/bg/chestnut.png",
+      "zPos": 9,
+      "variant": "chestnut"
+    },
+    {
+      "fileName": "arms/gloves/male/teal.png",
+      "zPos": 70,
+      "variant": "teal"
+    },
+    {
+      "fileName": "legs/shorts/short_shorts/male/charcoal.png",
+      "zPos": 20,
+      "variant": "charcoal"
+    },
+    {
+      "fileName": "feet/boots/rimmed/male/blue.png",
+      "zPos": 25,
+      "variant": "blue"
+    },
+    {
+      "fileName": "torso/clothes/shortsleeve/tshirt_scoop/male/lavender.png",
+      "zPos": 35,
+      "variant": "lavender"
+    }
+  ]
+}

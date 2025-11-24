@@ -1,0 +1,233 @@
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
+const NodeCache = require('node-cache');
+const { generateSpritesheet, generateSpritesheets } = require('./src/renderer');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Cache for generated spritesheets (1 hour TTL)
+const cache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
+
+// Middleware
+app.use(helmet());
+app.use(cors());
+app.use(compression());
+app.use(express.json({ limit: '10mb' }));
+
+// Rate limiting (100 requests per 15 minutes per IP)
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: { error: 'Too many requests, please try again later.' }
+});
+app.use('/api/', limiter);
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
+// Root endpoint with API info
+app.get('/', (req, res) => {
+  res.json({
+    name: 'LPC Spritesheet Generator API',
+    version: '1.0.0',
+    endpoints: {
+      health: 'GET /health',
+      generate: 'POST /api/generate',
+      generateBatch: 'POST /api/generate-batch'
+    },
+    documentation: 'https://github.com/liberatedpixelcup/Universal-LPC-Spritesheet-Character-Generator'
+  });
+});
+
+/**
+ * POST /api/generate
+ * Generate a single spritesheet
+ *
+ * Body: {
+ *   bodyTypeName: "male",
+ *   layers: [
+ *     { fileName: "body/bodies/male/fur_grey.png", zPos: 10, variant: "fur_grey" },
+ *     ...
+ *   ]
+ * }
+ *
+ * Returns: PNG image
+ */
+app.post('/api/generate', async (req, res) => {
+  const startTime = Date.now();
+
+  try {
+    const { bodyTypeName, layers } = req.body;
+
+    // Validation
+    if (!bodyTypeName || !layers || !Array.isArray(layers)) {
+      return res.status(400).json({
+        error: 'Invalid request',
+        message: 'Request must include bodyTypeName (string) and layers (array)'
+      });
+    }
+
+    if (layers.length === 0) {
+      return res.status(400).json({
+        error: 'Invalid request',
+        message: 'layers array cannot be empty'
+      });
+    }
+
+    // Validate each layer
+    for (const layer of layers) {
+      if (!layer.fileName || typeof layer.zPos !== 'number') {
+        return res.status(400).json({
+          error: 'Invalid layer',
+          message: 'Each layer must have fileName (string) and zPos (number)'
+        });
+      }
+    }
+
+    // Generate cache key
+    const cacheKey = JSON.stringify({ bodyTypeName, layers });
+    const cached = cache.get(cacheKey);
+
+    if (cached) {
+      console.log(`[Cache Hit] ${bodyTypeName} - ${layers.length} layers`);
+      res.set({
+        'Content-Type': 'image/png',
+        'X-Cache': 'HIT',
+        'X-Render-Time': '0ms'
+      });
+      return res.send(cached);
+    }
+
+    // Generate spritesheet
+    const canvas = await generateSpritesheet({ bodyTypeName, layers });
+    const buffer = canvas.toBuffer('image/png');
+
+    // Cache the result
+    cache.set(cacheKey, buffer);
+
+    const renderTime = Date.now() - startTime;
+
+    console.log(`[Generated] ${bodyTypeName} - ${layers.length} layers - ${renderTime}ms - ${buffer.length} bytes`);
+
+    res.set({
+      'Content-Type': 'image/png',
+      'Content-Length': buffer.length,
+      'X-Cache': 'MISS',
+      'X-Render-Time': `${renderTime}ms`
+    });
+
+    res.send(buffer);
+
+  } catch (error) {
+    console.error('Error generating spritesheet:', error);
+    res.status(500).json({
+      error: 'Generation failed',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/generate-batch
+ * Generate multiple spritesheets (for different body types)
+ *
+ * Body: [
+ *   { bodyTypeName: "male", layers: [...] },
+ *   { bodyTypeName: "female", layers: [...] }
+ * ]
+ *
+ * Returns: JSON with base64-encoded PNGs
+ */
+app.post('/api/generate-batch', async (req, res) => {
+  const startTime = Date.now();
+
+  try {
+    const definitions = req.body;
+
+    if (!Array.isArray(definitions) || definitions.length === 0) {
+      return res.status(400).json({
+        error: 'Invalid request',
+        message: 'Request body must be a non-empty array of layer definitions'
+      });
+    }
+
+    if (definitions.length > 10) {
+      return res.status(400).json({
+        error: 'Too many requests',
+        message: 'Maximum 10 spritesheets per batch request'
+      });
+    }
+
+    // Generate all spritesheets
+    const results = await generateSpritesheets(definitions);
+
+    // Convert to base64 for JSON response
+    const response = results.map(result => {
+      if (result.success) {
+        const buffer = result.canvas.toBuffer('image/png');
+        return {
+          bodyTypeName: result.bodyTypeName,
+          success: true,
+          data: buffer.toString('base64'),
+          size: buffer.length
+        };
+      } else {
+        return {
+          bodyTypeName: result.bodyTypeName,
+          success: false,
+          error: result.error
+        };
+      }
+    });
+
+    const renderTime = Date.now() - startTime;
+
+    console.log(`[Batch Generated] ${results.length} spritesheets - ${renderTime}ms`);
+
+    res.json({
+      results: response,
+      totalTime: `${renderTime}ms`
+    });
+
+  } catch (error) {
+    console.error('Error in batch generation:', error);
+    res.status(500).json({
+      error: 'Batch generation failed',
+      message: error.message
+    });
+  }
+});
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Not Found',
+    message: `Route ${req.method} ${req.path} not found`
+  });
+});
+
+// Error handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({
+    error: 'Internal Server Error',
+    message: err.message
+  });
+});
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`🚀 LPC Generator API running on port ${PORT}`);
+  console.log(`📍 Health check: http://localhost:${PORT}/health`);
+  console.log(`📦 Environment: ${process.env.NODE_ENV || 'development'}`);
+});
